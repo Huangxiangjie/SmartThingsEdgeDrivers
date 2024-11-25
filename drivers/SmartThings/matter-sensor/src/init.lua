@@ -52,7 +52,7 @@ local TEMP_MIN = "__temp_min"
 local TEMP_MAX = "__temp_max"
 
 -- HUE-0x100B, MultiIR-0x1477
-local NOT_SUPPORT_BatPercentRemaining_VID = {{vendor_id = 0x100B}, {vendor_id = 0x1477}}
+local NOT_SUPPORT_BAT_PERCENT_REMAINING_VID = {0x100B, 0x1477}
 
 local function get_field_for_endpoint(device, field, endpoint)
   return device:get_field(string.format("%s_%d", field, endpoint))
@@ -89,9 +89,9 @@ local function set_boolean_device_type_per_endpoint(driver, device)
   end
 end
 
-local function check_battery_percent_remaining_devices(device)
-  for _, no_battery_percentRemaining in pairs(NOT_SUPPORT_BatPercentRemaining_VID) do
-    if device.manufacturer_info.vendor_id == no_battery_percentRemaining.vendor_id then
+local function battery_device_not_support_bat_percent_remaining(device)
+  for not_support_bat_percent_remaining_vid in NOT_SUPPORT_BAT_PERCENT_REMAINING_VID do
+    if device.manufacturer_info.vendor_id == not_support_bat_percent_remaining_vid then
       return false
     end
   end
@@ -102,7 +102,7 @@ local function supports_battery_percentage_remaining(device)
   local battery_eps = device:get_endpoints(clusters.PowerSource.ID,
           {feature_bitmap = clusters.PowerSource.types.PowerSourceFeature.BATTERY})
   -- Hue devices support the PowerSource cluster but don't support reporting battery percentage remaining
-  if #battery_eps > 0 and check_battery_percent_remaining_devices(device) then
+  if #battery_eps > 0 and battery_device_not_support_bat_percent_remaining(device) then
     return true
   end
   return false
