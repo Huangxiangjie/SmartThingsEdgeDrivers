@@ -27,6 +27,11 @@ IkeaScrollFields.PER_SCROLL_EVENT_ROTATION = st_utils.round(1 / IkeaScrollFields
 -- Throttle interval: accumulate scroll events and emit once per interval (seconds)
 IkeaScrollFields.SCROLL_EVENT_THROTTLE_INTERVAL = 1
 
+-- Minimum gap between two events to allow immediate emit (seconds)
+-- If the time since the last emit is >= this value, the event is emitted immediately;
+-- otherwise it is accumulated and emitted at the end of the throttle interval.
+IkeaScrollFields.SCROLL_EVENT_IMMEDIATE_EMIT_GAP = 1
+
 -- Field to track the latest number of presses counted during a single scroll event sequence
 IkeaScrollFields.LATEST_NUMBER_OF_PRESSES_COUNTED = "__latest_number_of_presses_counted"
 

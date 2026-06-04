@@ -10,13 +10,17 @@ local scroll_fields = require "sub_drivers.ikea_scroll.scroll_utils.fields"
 local IkeaScrollEventHandlers = {}
 
 
--- Per-endpoint field key helpers for accumulated scroll data and throttle timer
+-- Per-endpoint field key helpers for throttle state
 local function scroll_accumulated_field(endpoint_id)
   return "__scroll_accumulated_" .. tostring(endpoint_id)
 end
 
 local function scroll_timer_field(endpoint_id)
   return "__scroll_timer_" .. tostring(endpoint_id)
+end
+
+local function scroll_last_emit_time_field(endpoint_id)
+  return "__scroll_last_emit_time_" .. tostring(endpoint_id)
 end
 
 -- Emit the accumulated scroll amount for an endpoint and clear the throttle state
@@ -26,6 +30,7 @@ local function emit_accumulated_scroll(device, endpoint_id)
   device:set_field(scroll_timer_field(endpoint_id), nil)
   if accumulated ~= 0 then
     device:emit_event_for_endpoint(endpoint_id, capabilities.knob.rotateAmount(accumulated, {state_change = true}))
+    device:set_field(scroll_last_emit_time_field(endpoint_id), os.time())
   end
 end
 
@@ -34,18 +39,40 @@ local function rotate_amount_event_helper(device, endpoint_id, num_presses_to_ha
   local scroll_direction = switch_utils.tbl_contains(scroll_fields.ENDPOINTS_UP_SCROLL, endpoint_id) and 1 or -1
   local scroll_amount = scroll_direction * scroll_fields.PER_SCROLL_EVENT_ROTATION * num_presses_to_handle
 
-  -- Accumulate the scroll amount for this endpoint
-  local accumulated = device:get_field(scroll_accumulated_field(endpoint_id)) or 0
-  accumulated = st_utils.clamp_value(accumulated + scroll_amount, -100, 100)
-  device:set_field(scroll_accumulated_field(endpoint_id), accumulated)
-
-  -- If no throttle timer is running for this endpoint, start one
   local existing_timer = device:get_field(scroll_timer_field(endpoint_id))
-  if existing_timer == nil then
-    local timer = device.thread:call_with_delay(scroll_fields.SCROLL_EVENT_THROTTLE_INTERVAL, function()
-      emit_accumulated_scroll(device, endpoint_id)
-    end)
-    device:set_field(scroll_timer_field(endpoint_id), timer)
+
+  if existing_timer ~= nil then
+    -- Timer is running: just accumulate, the timer will emit when it fires
+    local accumulated = device:get_field(scroll_accumulated_field(endpoint_id)) or 0
+    accumulated = st_utils.clamp_value(accumulated + scroll_amount, -100, 100)
+    device:set_field(scroll_accumulated_field(endpoint_id), accumulated)
+  else
+    -- No timer running: check time since last emit
+    local last_emit_time = device:get_field(scroll_last_emit_time_field(endpoint_id))
+    local now = os.time()
+    local elapsed = last_emit_time and (now - last_emit_time) or scroll_fields.SCROLL_EVENT_IMMEDIATE_EMIT_GAP
+
+    if elapsed >= scroll_fields.SCROLL_EVENT_IMMEDIATE_EMIT_GAP then
+      -- Gap since last emit is >= 1s (or first event ever): emit immediately
+      local clamped = st_utils.clamp_value(scroll_amount, -100, 100)
+      device:emit_event_for_endpoint(endpoint_id, capabilities.knob.rotateAmount(clamped, {state_change = true}))
+      device:set_field(scroll_last_emit_time_field(endpoint_id), now)
+      -- Start a 1s throttle window for any subsequent events
+      local timer = device.thread:call_with_delay(scroll_fields.SCROLL_EVENT_THROTTLE_INTERVAL, function()
+        emit_accumulated_scroll(device, endpoint_id)
+      end)
+      device:set_field(scroll_timer_field(endpoint_id), timer)
+    else
+      -- Gap since last emit is < 1s: accumulate and start timer for the remaining time
+      local accumulated = device:get_field(scroll_accumulated_field(endpoint_id)) or 0
+      accumulated = st_utils.clamp_value(accumulated + scroll_amount, -100, 100)
+      device:set_field(scroll_accumulated_field(endpoint_id), accumulated)
+      local remaining = scroll_fields.SCROLL_EVENT_THROTTLE_INTERVAL - elapsed
+      local timer = device.thread:call_with_delay(remaining, function()
+        emit_accumulated_scroll(device, endpoint_id)
+      end)
+      device:set_field(scroll_timer_field(endpoint_id), timer)
+    end
   end
 end
 
