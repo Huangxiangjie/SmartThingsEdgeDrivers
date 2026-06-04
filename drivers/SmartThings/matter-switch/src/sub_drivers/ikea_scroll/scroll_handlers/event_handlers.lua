@@ -9,11 +9,44 @@ local scroll_fields = require "sub_drivers.ikea_scroll.scroll_utils.fields"
 
 local IkeaScrollEventHandlers = {}
 
+
+-- Per-endpoint field key helpers for accumulated scroll data and throttle timer
+local function scroll_accumulated_field(endpoint_id)
+  return "__scroll_accumulated_" .. tostring(endpoint_id)
+end
+
+local function scroll_timer_field(endpoint_id)
+  return "__scroll_timer_" .. tostring(endpoint_id)
+end
+
+-- Emit the accumulated scroll amount for an endpoint and clear the throttle state
+local function emit_accumulated_scroll(device, endpoint_id)
+  local accumulated = device:get_field(scroll_accumulated_field(endpoint_id)) or 0
+  device:set_field(scroll_accumulated_field(endpoint_id), nil)
+  device:set_field(scroll_timer_field(endpoint_id), nil)
+  if accumulated ~= 0 then
+    device:emit_event_for_endpoint(endpoint_id, capabilities.knob.rotateAmount(accumulated, {state_change = true}))
+  end
+end
+
 local function rotate_amount_event_helper(device, endpoint_id, num_presses_to_handle)
   -- to cut down on checks, we can assume that if the endpoint is not in ENDPOINTS_UP_SCROLL, it is in ENDPOINTS_DOWN_SCROLL
   local scroll_direction = switch_utils.tbl_contains(scroll_fields.ENDPOINTS_UP_SCROLL, endpoint_id) and 1 or -1
-  local scroll_amount = st_utils.clamp_value(scroll_direction * scroll_fields.PER_SCROLL_EVENT_ROTATION * num_presses_to_handle, -100, 100)
-  device:emit_event_for_endpoint(endpoint_id, capabilities.knob.rotateAmount(scroll_amount, {state_change = true}))
+  local scroll_amount = scroll_direction * scroll_fields.PER_SCROLL_EVENT_ROTATION * num_presses_to_handle
+
+  -- Accumulate the scroll amount for this endpoint
+  local accumulated = device:get_field(scroll_accumulated_field(endpoint_id)) or 0
+  accumulated = st_utils.clamp_value(accumulated + scroll_amount, -100, 100)
+  device:set_field(scroll_accumulated_field(endpoint_id), accumulated)
+
+  -- If no throttle timer is running for this endpoint, start one
+  local existing_timer = device:get_field(scroll_timer_field(endpoint_id))
+  if existing_timer == nil then
+    local timer = device.thread:call_with_delay(scroll_fields.SCROLL_EVENT_THROTTLE_INTERVAL, function()
+      emit_accumulated_scroll(device, endpoint_id)
+    end)
+    device:set_field(scroll_timer_field(endpoint_id), timer)
+  end
 end
 
 -- Used by ENDPOINTS_UP_SCROLL and ENDPOINTS_DOWN_SCROLL, not ENDPOINTS_PUSH
