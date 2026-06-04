@@ -27,6 +27,14 @@ IkeaScrollFields.PER_SCROLL_EVENT_ROTATION = st_utils.round(1 / IkeaScrollFields
 -- Field to track the latest number of presses counted during a single scroll event sequence
 IkeaScrollFields.LATEST_NUMBER_OF_PRESSES_COUNTED = "__latest_number_of_presses_counted"
 
+-- Time-window accumulation fields for scroll events
+IkeaScrollFields.SCROLL_WINDOW_KEY = "__scroll_window_active"
+IkeaScrollFields.SCROLL_ACCUM_KEY = "__scroll_accum_vals"  -- table: {[ep_id] = accum_val}
+IkeaScrollFields.SCROLL_TIMER_KEY = "__scroll_timer"
+IkeaScrollFields.SCROLL_WINDOW_DURATION = 1  -- 1 second debounce window
+IkeaScrollFields.SCROLL_REPORT_TIMER_KEY = "__scroll_report_timer"
+IkeaScrollFields.SCROLL_REPORT_INTERVAL = 3  -- 3 second periodic report interval
+
 -- Required Events for the ENDPOINTS_PUSH.
 IkeaScrollFields.switch_press_subscribed_events = {
   clusters.Switch.events.InitialPress.ID,
