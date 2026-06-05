@@ -23,6 +23,15 @@ local function scroll_last_emit_time_field(endpoint_id)
   return "__scroll_last_emit_time_" .. tostring(endpoint_id)
 end
 
+-- Per-endpoint counter field helpers for optimization tracking
+local function scroll_input_count_field(endpoint_id)
+  return "__scroll_input_count_" .. tostring(endpoint_id)
+end
+
+local function scroll_emit_count_field(endpoint_id)
+  return "__scroll_emit_count_" .. tostring(endpoint_id)
+end
+
 -- Emit the accumulated scroll amount for an endpoint and clear the throttle state
 local function emit_accumulated_scroll(device, endpoint_id)
   local accumulated = device:get_field(scroll_accumulated_field(endpoint_id)) or 0
@@ -31,10 +40,19 @@ local function emit_accumulated_scroll(device, endpoint_id)
   if accumulated ~= 0 then
     device:emit_event_for_endpoint(endpoint_id, capabilities.knob.rotateAmount(accumulated, {state_change = true}))
     device:set_field(scroll_last_emit_time_field(endpoint_id), os.time())
+    local emit_count = (device:get_field(scroll_emit_count_field(endpoint_id)) or 0) + 1
+    device:set_field(scroll_emit_count_field(endpoint_id), emit_count)
+    local input_count = device:get_field(scroll_input_count_field(endpoint_id)) or 0
+    device.log.info_with({hub_logs = true}, string.format("[ScrollThrottle] EP %d: emit #%d, input_count=%d, reduction=%.1f%%",
+      endpoint_id, emit_count, input_count, (1 - emit_count / input_count) * 100))
   end
 end
 
 local function rotate_amount_event_helper(device, endpoint_id, num_presses_to_handle)
+  -- Increment input counter for optimization tracking
+  local input_count = (device:get_field(scroll_input_count_field(endpoint_id)) or 0) + 1
+  device:set_field(scroll_input_count_field(endpoint_id), input_count)
+
   -- to cut down on checks, we can assume that if the endpoint is not in ENDPOINTS_UP_SCROLL, it is in ENDPOINTS_DOWN_SCROLL
   local scroll_direction = switch_utils.tbl_contains(scroll_fields.ENDPOINTS_UP_SCROLL, endpoint_id) and 1 or -1
   local scroll_amount = scroll_direction * scroll_fields.PER_SCROLL_EVENT_ROTATION * num_presses_to_handle
@@ -50,25 +68,23 @@ local function rotate_amount_event_helper(device, endpoint_id, num_presses_to_ha
     -- No timer running: check time since last emit
     local last_emit_time = device:get_field(scroll_last_emit_time_field(endpoint_id))
     local now = os.time()
-    local elapsed = last_emit_time and (now - last_emit_time) or scroll_fields.SCROLL_EVENT_IMMEDIATE_EMIT_GAP
+    local elapsed = last_emit_time and (now - last_emit_time) or 0
 
     if elapsed >= scroll_fields.SCROLL_EVENT_IMMEDIATE_EMIT_GAP then
-      -- Gap since last emit is >= 1s (or first event ever): emit immediately
-      local clamped = st_utils.clamp_value(scroll_amount, -100, 100)
-      device:emit_event_for_endpoint(endpoint_id, capabilities.knob.rotateAmount(clamped, {state_change = true}))
-      device:set_field(scroll_last_emit_time_field(endpoint_id), now)
-      -- Start a 1s throttle window for any subsequent events
-      local timer = device.thread:call_with_delay(scroll_fields.SCROLL_EVENT_THROTTLE_INTERVAL, function()
+      -- Gap since last emit is >= IMMEDIATE_EMIT_GAP: accumulate and start a short throttle window
+      local accumulated = device:get_field(scroll_accumulated_field(endpoint_id)) or 0
+      accumulated = st_utils.clamp_value(accumulated + scroll_amount, -100, 100)
+      device:set_field(scroll_accumulated_field(endpoint_id), accumulated)
+      local timer = device.thread:call_with_delay(scroll_fields.SCROLL_EVENT_SHORT_WINDOW, function()
         emit_accumulated_scroll(device, endpoint_id)
       end)
       device:set_field(scroll_timer_field(endpoint_id), timer)
     else
-      -- Gap since last emit is < 1s: accumulate and start timer for the remaining time
+      -- Gap since last emit is < IMMEDIATE_EMIT_GAP: accumulate and start a normal throttle window
       local accumulated = device:get_field(scroll_accumulated_field(endpoint_id)) or 0
       accumulated = st_utils.clamp_value(accumulated + scroll_amount, -100, 100)
       device:set_field(scroll_accumulated_field(endpoint_id), accumulated)
-      local remaining = scroll_fields.SCROLL_EVENT_THROTTLE_INTERVAL - elapsed
-      local timer = device.thread:call_with_delay(remaining, function()
+      local timer = device.thread:call_with_delay(scroll_fields.SCROLL_EVENT_THROTTLE_INTERVAL, function()
         emit_accumulated_scroll(device, endpoint_id)
       end)
       device:set_field(scroll_timer_field(endpoint_id), timer)
