@@ -31,25 +31,32 @@ end
 
 -- Flush accumulated values and close the window (user stopped scrolling)
 local function flush_and_close(device)
-  -- Cancel the periodic report timer
-  local report_timer = device:get_field(scroll_fields.SCROLL_REPORT_TIMER_KEY)
+  -- Cancel the initial emit timer
+  local initial_timer = device:get_field(scroll_fields.SCROLL_INITIAL_EMIT_TIMER_KEY)
+  if initial_timer then
+    pcall(function() device.thread:cancel_timer(initial_timer) end)
+  end
+
+  -- Cancel the periodic emit timer
+  local report_timer = device:get_field(scroll_fields.SCROLL_PERIODIC_EMIT_TIMER_KEY)
   if report_timer then
     pcall(function() device.thread:cancel_timer(report_timer) end)
   end
 
   emit_accumulated(device)
-  device:set_field(scroll_fields.SCROLL_WINDOW_KEY, false)
-  device:set_field(scroll_fields.SCROLL_TIMER_KEY, nil)
-  device:set_field(scroll_fields.SCROLL_REPORT_TIMER_KEY, nil)
+  device:set_field(scroll_fields.SCROLL_DEBOUNCE_ACTIVE_KEY, false)
+  device:set_field(scroll_fields.SCROLL_DEBOUNCE_TIMER_KEY, nil)
+  device:set_field(scroll_fields.SCROLL_PERIODIC_EMIT_TIMER_KEY, nil)
+  device:set_field(scroll_fields.SCROLL_INITIAL_EMIT_TIMER_KEY, nil)
   device:set_field(scroll_fields.SCROLL_ACCUM_KEY, {})
 end
 
--- Periodic report: emit accumulated values every SCROLL_REPORT_INTERVAL while scrolling
+-- Periodic emit: emit accumulated values every PERIODIC_EMIT_INTERVAL while scrolling
 local function periodic_report(device)
-  local window_active = device:get_field(scroll_fields.SCROLL_WINDOW_KEY)
-  if not window_active then
+  local debounce_active = device:get_field(scroll_fields.SCROLL_DEBOUNCE_ACTIVE_KEY)
+  if not debounce_active then
     -- Window already closed, stop reporting
-    device:set_field(scroll_fields.SCROLL_REPORT_TIMER_KEY, nil)
+    device:set_field(scroll_fields.SCROLL_PERIODIC_EMIT_TIMER_KEY, nil)
     return
   end
 
@@ -60,41 +67,69 @@ local function periodic_report(device)
   end
 
   -- Restart the periodic report timer
-  local timer = device.thread:call_with_delay(scroll_fields.SCROLL_REPORT_INTERVAL, function()
+  local timer = device.thread:call_with_delay(scroll_fields.SCROLL_PERIODIC_EMIT_INTERVAL, function()
     periodic_report(device)
   end)
-  device:set_field(scroll_fields.SCROLL_REPORT_TIMER_KEY, timer)
+  device:set_field(scroll_fields.SCROLL_PERIODIC_EMIT_TIMER_KEY, timer)
 end
 
--- Start a new debounce window with timer and periodic report timer
-local function start_debounce_window(device)
-  device:set_field(scroll_fields.SCROLL_WINDOW_KEY, true)
-  device:set_field(scroll_fields.SCROLL_ACCUM_KEY, {})
+-- Initial emit: emit accumulated values once after INITIAL_EMIT_DELAY, then start
+-- the debounce timer. The debounce timer only begins counting after the first emit,
+-- so the 1s idle timeout is measured from the last event after initial emit.
+local function initial_emit(device)
+  local debounce_active = device:get_field(scroll_fields.SCROLL_DEBOUNCE_ACTIVE_KEY)
+  if not debounce_active then
+    device:set_field(scroll_fields.SCROLL_INITIAL_EMIT_TIMER_KEY, nil)
+    return
+  end
 
-  -- Debounce timer: when user stops scrolling for 1s, flush and close
-  local timer = device.thread:call_with_delay(scroll_fields.SCROLL_WINDOW_DURATION, function()
+  local emitted = emit_accumulated(device)
+  if emitted then
+    device:set_field(scroll_fields.SCROLL_ACCUM_KEY, {})
+  end
+  device:set_field(scroll_fields.SCROLL_INITIAL_EMIT_TIMER_KEY, nil)
+
+  -- Start the debounce timer now that initial emit has fired
+  local timer = device.thread:call_with_delay(scroll_fields.SCROLL_DEBOUNCE_TIMEOUT, function()
     flush_and_close(device)
   end)
-  device:set_field(scroll_fields.SCROLL_TIMER_KEY, timer)
+  device:set_field(scroll_fields.SCROLL_DEBOUNCE_TIMER_KEY, timer)
 
-  -- Periodic report timer: emit intermediate state every 3s
-  local report_timer = device.thread:call_with_delay(scroll_fields.SCROLL_REPORT_INTERVAL, function()
+  -- Start the periodic emit timer now that initial emit has fired
+  local report_timer = device.thread:call_with_delay(scroll_fields.SCROLL_PERIODIC_EMIT_INTERVAL, function()
     periodic_report(device)
   end)
-  device:set_field(scroll_fields.SCROLL_REPORT_TIMER_KEY, report_timer)
+  device:set_field(scroll_fields.SCROLL_PERIODIC_EMIT_TIMER_KEY, report_timer)
+
+  device.log.info_with({ hub_logs = true },
+    string.format("[IkeaScroll] Initial emit fired after %.1fs, debounce and periodic timers started", scroll_fields.SCROLL_INITIAL_EMIT_DELAY))
+end
+
+-- Start a new debounce window (debounce and periodic timers start after initial emit)
+local function start_debounce_window(device)
+  device:set_field(scroll_fields.SCROLL_DEBOUNCE_ACTIVE_KEY, true)
+  device:set_field(scroll_fields.SCROLL_ACCUM_KEY, {})
+  device:set_field(scroll_fields.SCROLL_DEBOUNCE_TIMER_KEY, nil)
+  device:set_field(scroll_fields.SCROLL_PERIODIC_EMIT_TIMER_KEY, nil)
+
+  -- Initial emit timer: emit first batch of accumulated values after INITIAL_EMIT_DELAY
+  local initial_timer = device.thread:call_with_delay(scroll_fields.SCROLL_INITIAL_EMIT_DELAY, function()
+    initial_emit(device)
+  end)
+  device:set_field(scroll_fields.SCROLL_INITIAL_EMIT_TIMER_KEY, initial_timer)
 end
 
 -- Reset (restart) the debounce timer without clearing accumulated values
 local function reset_debounce_timer(device)
-  local existing_timer = device:get_field(scroll_fields.SCROLL_TIMER_KEY)
+  local existing_timer = device:get_field(scroll_fields.SCROLL_DEBOUNCE_TIMER_KEY)
   if existing_timer then
     pcall(function() device.thread:cancel_timer(existing_timer) end)
   end
 
-  local timer = device.thread:call_with_delay(scroll_fields.SCROLL_WINDOW_DURATION, function()
+  local timer = device.thread:call_with_delay(scroll_fields.SCROLL_DEBOUNCE_TIMEOUT, function()
     flush_and_close(device)
   end)
-  device:set_field(scroll_fields.SCROLL_TIMER_KEY, timer)
+  device:set_field(scroll_fields.SCROLL_DEBOUNCE_TIMER_KEY, timer)
 end
 
 local function rotate_amount_event_helper(device, endpoint_id, num_presses_to_handle)
@@ -102,15 +137,18 @@ local function rotate_amount_event_helper(device, endpoint_id, num_presses_to_ha
   local scroll_direction = switch_utils.tbl_contains(scroll_fields.ENDPOINTS_UP_SCROLL, endpoint_id) and 1 or -1
   local scroll_amount = st_utils.clamp_value(scroll_direction * scroll_fields.PER_SCROLL_EVENT_ROTATION * num_presses_to_handle, -100, 100)
 
-  local window_active = device:get_field(scroll_fields.SCROLL_WINDOW_KEY)
+  local debounce_active = device:get_field(scroll_fields.SCROLL_DEBOUNCE_ACTIVE_KEY)
 
-  if not window_active then
-    -- First trigger: emit immediately for instant feedback, then start debounce window
+  if not debounce_active then
+    -- First trigger: start debounce window and accumulate (initial emit fires after INITIAL_EMIT_DELAY)
     start_debounce_window(device)
 
-    device:emit_event_for_endpoint(endpoint_id, capabilities.knob.rotateAmount(scroll_amount, {state_change = true}))
+    local accum_table = device:get_field(scroll_fields.SCROLL_ACCUM_KEY) or {}
+    accum_table[endpoint_id] = st_utils.clamp_value(scroll_amount, -100, 100)
+    device:set_field(scroll_fields.SCROLL_ACCUM_KEY, accum_table)
+
     device.log.info_with({ hub_logs = true },
-      string.format("[IkeaScroll] Scroll first trigger: ep=%d, amount=%d, starting %.1fs debounce window", endpoint_id, scroll_amount, scroll_fields.SCROLL_WINDOW_DURATION))
+      string.format("[IkeaScroll] Scroll first trigger: ep=%d, amount=%d, starting %.1fs debounce window (initial emit in %.1fs)", endpoint_id, scroll_amount, scroll_fields.SCROLL_DEBOUNCE_TIMEOUT, scroll_fields.SCROLL_INITIAL_EMIT_DELAY))
   else
     -- Within the window: accumulate value per endpoint
     local accum_table = device:get_field(scroll_fields.SCROLL_ACCUM_KEY) or {}
@@ -119,7 +157,10 @@ local function rotate_amount_event_helper(device, endpoint_id, num_presses_to_ha
     device:set_field(scroll_fields.SCROLL_ACCUM_KEY, accum_table)
 
     -- Debounce: reset timer on each new event so we emit shortly after user pauses
-    reset_debounce_timer(device)
+    -- (only if debounce timer has been started, i.e. initial emit already fired)
+    if device:get_field(scroll_fields.SCROLL_DEBOUNCE_TIMER_KEY) then
+      reset_debounce_timer(device)
+    end
 
     device.log.info_with({ hub_logs = true },
       string.format("[IkeaScroll] Scroll accumulating: ep=%d, amount=%d, accum=%d", endpoint_id, scroll_amount, accum_table[endpoint_id]))
